@@ -1,10 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using BookSleeve;
 using System.Threading.Tasks;
-using System.Reactive.Linq;
+using BookSleeve;
 
 namespace log4net.redis
 {
@@ -12,8 +9,9 @@ namespace log4net.redis
     {
         public Task<RedisConnection> CreateRedisConnection()
         {
-            var settings = RedisConnectionProvider.Instance.ConnectionsSettings;
-            var redisConnection = new RedisConnection(host: settings["host"], port: Convert.ToInt32(settings["port"]), password: settings["password"]);
+            IDictionary<string, string> settings = RedisConnectionProvider.Instance.ConnectionsSettings;
+            var redisConnection = new RedisConnection(host: settings["host"], port: Convert.ToInt32(settings["port"]),
+                                                      password: settings["password"]);
             var taskCreateConnection = new TaskCompletionSource<RedisConnection>();
 
             try

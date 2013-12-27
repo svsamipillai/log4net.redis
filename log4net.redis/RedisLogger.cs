@@ -1,88 +1,91 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using BookSleeve;
-using System.Threading.Tasks;
 using System.Globalization;
-using System.Threading;
-using System.Reactive.Subjects;
 using System.Reactive.Linq;
-using System.Reactive;
+using System.Reactive.Subjects;
+using System.Threading;
+using System.Threading.Tasks;
+using BookSleeve;
+using log4net.Core;
 
 namespace log4net.redis
 {
     internal class RedisLogger : IRedisLog, IDisposable
     {
         private readonly string key;
+        private readonly ILog log;
+        private readonly ReplaySubject<Tuple<string, string>> messagesSubject;
+        private readonly BehaviorSubject<bool> retry;
         private volatile RedisConnection redisConnection;
         private RedisConnectionFactory redisConnectionFactory;
-        private ReplaySubject<Tuple<string, string>> messagesSubject;
-        private BehaviorSubject<bool> retry;
-        private ILog log;
         private IDisposable subscription;
 
         internal RedisLogger(string key, ILog log, IRedisConnectionFactory redisConnectionFactory)
         {
             this.key = string.Format(CultureInfo.InvariantCulture, "{0}:{1}", log.Logger.Name, key);
             this.log = log;
-            this.messagesSubject = new ReplaySubject<Tuple<string, string>>(100, TimeSpan.FromSeconds(5));
-            this.retry = new BehaviorSubject<bool>(false);
+            messagesSubject = new ReplaySubject<Tuple<string, string>>(100, TimeSpan.FromSeconds(5));
+            retry = new BehaviorSubject<bool>(false);
 
             var redisOnConnectionAction = new Action<Task<RedisConnection>>(task =>
-            {
-                if (task.IsCompleted && !task.IsFaulted)
                 {
-                    Interlocked.CompareExchange<RedisConnection>(ref this.redisConnection, task.Result, null);
-                    subscription = messagesSubject.TakeUntil(retry.Skip(1)).Subscribe((item) => 
-                        {
-                            redisConnection.Publish(item.Item1, item.Item2).ContinueWith(taskWithException =>
-                                {
-                                    taskWithException.Exception.Handle(ex => true);
-                                }, TaskContinuationOptions.OnlyOnFaulted);
-                        });
-                }
-            });
+                    if (task.IsCompleted && !task.IsFaulted)
+                    {
+                        Interlocked.CompareExchange(ref redisConnection, task.Result, null);
+                        subscription =
+                            messagesSubject.TakeUntil(retry.Skip(1))
+                                           .Subscribe(
+                                               (item) => redisConnection.Publish(item.Item1, item.Item2)
+                                                                        .ContinueWith(
+                                                                            taskWithException => taskWithException.Exception.Handle(
+                                                                                ex => true),
+                                                                            TaskContinuationOptions.OnlyOnFaulted));
+                    }
+                });
 
             var redisOnErrorAction = new Action<ErrorEventArgs>(ex =>
                 {
                     if (ex.IsFatal)
                     {
                         retry.OnNext(true);
-                        Interlocked.Exchange<RedisConnection>(ref this.redisConnection, null);
+                        Interlocked.Exchange(ref redisConnection, null);
                     }
                 });
 
             Action subscribeAction = () =>
-            {
-                var connectionTask = redisConnectionFactory.CreateRedisConnection();
-                connectionTask.ContinueWith(taskConnection =>
-                    {
-                        if (!taskConnection.IsFaulted)
+                {
+                    Task<RedisConnection> connectionTask = redisConnectionFactory.CreateRedisConnection();
+                    connectionTask.ContinueWith(taskConnection =>
                         {
-                            taskConnection.ContinueWith(redisOnConnectionAction);
-                            taskConnection.Result.Error += (_, err) => redisOnErrorAction(err);
-                        }
-                        else
-                        {
-                            taskConnection.Exception.Handle(_ => true);
-                            this.retry.OnNext(true);
-                        }
-                    });
-            };
+                            if (!taskConnection.IsFaulted)
+                            {
+                                taskConnection.ContinueWith(redisOnConnectionAction);
+                                taskConnection.Result.Error += (_, err) => redisOnErrorAction(err);
+                            }
+                            else
+                            {
+                                taskConnection.Exception.Handle(_ => true);
+                                retry.OnNext(true);
+                            }
+                        });
+                };
 
             retry.Subscribe(val =>
                 {
                     if (val)
-                        Observable.Timer(TimeSpan.FromSeconds(10)).Subscribe(_ => subscribeAction()); 
+                        Observable.Timer(TimeSpan.FromSeconds(10)).Subscribe(_ => subscribeAction());
                     else
                         subscribeAction();
                 });
         }
 
-        private void Publish(string key, string message)
+        public void Dispose()
         {
-            messagesSubject.OnNext(new Tuple<string, string>(key, message));
+            if (redisConnection != null)
+            {
+                redisConnection.Close(true);
+                redisConnection.Dispose();
+                redisConnection = null;
+            }
         }
 
         public ILog ObserverKey(string key, ILog log, IRedisConnectionFactory redisConnectionFactory)
@@ -97,37 +100,37 @@ namespace log4net.redis
 
         public void Debug(object message)
         {
-            Publish(this.key, message.ToString());
+            Publish(key, message.ToString());
             log.Debug(message);
         }
 
         public void DebugFormat(IFormatProvider provider, string format, params object[] args)
         {
-            Publish(this.key, string.Format(provider, format, args));
+            Publish(key, string.Format(provider, format, args));
             log.DebugFormat(provider, format, args);
         }
 
         public void DebugFormat(string format, object arg0, object arg1, object arg2)
         {
-            Publish(this.key, string.Format(format, arg0, arg1, arg2));
+            Publish(key, string.Format(format, arg0, arg1, arg2));
             log.DebugFormat(format, arg0, arg1, arg2);
         }
 
         public void DebugFormat(string format, object arg0, object arg1)
         {
-            Publish(this.key, string.Format(format, arg0, arg1));
+            Publish(key, string.Format(format, arg0, arg1));
             log.DebugFormat(format, arg0, arg1);
         }
 
         public void DebugFormat(string format, object arg0)
         {
-            Publish(this.key, string.Format(format, arg0));
+            Publish(key, string.Format(format, arg0));
             log.DebugFormat(format, arg0);
         }
 
         public void DebugFormat(string format, params object[] args)
         {
-            Publish(this.key, string.Format(format, args));
+            Publish(key, string.Format(format, args));
             log.DebugFormat(format, args);
         }
 
@@ -296,19 +299,14 @@ namespace log4net.redis
             log.WarnFormat(format, args);
         }
 
-        public Core.ILogger Logger
+        public ILogger Logger
         {
             get { return log.Logger; }
         }
 
-        public void Dispose()
+        private void Publish(string key, string message)
         {
-            if (redisConnection != null)
-            {
-                redisConnection.Close(true);
-                redisConnection.Dispose();
-                redisConnection = null;
-            }
+            messagesSubject.OnNext(new Tuple<string, string>(key, message));
         }
     }
 }
